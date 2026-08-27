@@ -19,6 +19,8 @@ backbone:
   encode_batch_size: 256
   expect_l2_normalized: true    # verified in Phase 3; else normalize explicitly
   embedding_dim: 768
+  cache_dtype: float16          # encoding + norm check are fp32; cache stored fp16
+                                # (uniform across conditions -> cannot bias contrasts)
 
 # ------------------------------- conditions --------------------------------
 # feature blocks: u, v, diff = |u-v|, prod = u*v, absprod = |u*v|,

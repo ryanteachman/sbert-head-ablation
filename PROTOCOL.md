@@ -168,16 +168,27 @@ published splits only — no custom splits, no cross-validation.
   revision drops the Normalize module, apply L2 normalization explicitly — unit-
   norm `u`, `v` are part of the fixed protocol (the scale of `|u−v|` and `u*v`
   depends on it).
-- **Precision:** fp32. **Encode batch size:** 256. Max sequence length: model
-  default (384).
+- **Precision:** encoding and the unit-norm check run in fp32. **Encode batch
+  size:** 256. Max sequence length: model default (384).
 - **Determinism:** fixed RNG seeds; `torch.use_deterministic_algorithms(True)`
   where feasible. Encoding in `eval()` mode is deterministic regardless.
-  Verification: encode one batch twice, assert bit-identical.
-- **Dedup:** encode the set of *unique* sentences per dataset, then gather into
-  `(u, v)` pairs (large savings on QQP/PAWS).
-- **Cache:** one file per dataset split holding `emb_u`, `emb_v`, `labels`, plus a
-  sidecar recording model name + revision + preprocessing-code hash. Embeddings
-  are computed **once** and reused by every run.
+  Verification: encode one batch twice, assert bit-identical. (Confirmed
+  2026-08-27: module stack `[Transformer, Pooling, Normalize]`, re-encode
+  bit-identical, max ‖emb‖−1 ≈ 1.2e-7.)
+- **Dedup:** encode the set of *unique* sentences per split, then gather into
+  `(u, v)` pairs. (Dedup is modest in practice — NLI train: 942k pairs →
+  1.15M unique sentences; QQP train: 346k → 474k.)
+- **Cache:** one `.npz` per dataset split holding `uniq_emb` (unique-sentence
+  embeddings), `idx_a` / `idx_b` (per-pair row indices), and `label`; plus
+  `meta.json` recording model name + resolved commit + module stack + library
+  versions + per-split counts + the norm check. Embeddings are computed **once**
+  and reused by every run.
+- **Cache dtype: fp16.** Stored embeddings are cast to float16 (fp32 total ≈
+  5.6 GB → fp16 ≈ 2.8 GB). The cast introduces ~1e-3 relative error applied
+  *identically to every condition*, so it cannot bias any C-vs-C contrast;
+  block standardization and the `|u−v|` / `u*v` features are recomputed in fp32
+  from the fp16 cache. `--dtype float32` is available if a robustness check is
+  wanted.
 
 ---
 

@@ -27,7 +27,8 @@ pip freeze > requirements.lock.txt      # lock the resolved versions
 | `PROTOCOL.md` | frozen experimental protocol (§1–§20) |
 | `config/experiment.yaml` | frozen constants used by the code |
 | `src/data.py` | download datasets, clean labels, carve QQP val split (Phase 2) |
-| `src/embed.py` | load frozen backbone, dedup + encode + cache (Phase 3) |
+| `src/embed.py` | load frozen backbone, dedup + encode + cache as fp16 `.npz` (Phase 3) |
+| `notebooks/embed_colab.ipynb` | run Phase 3 on Colab GPU, embeddings → Google Drive |
 | `src/features.py` | build C0–C9 feature vectors, standardization, random projection |
 | `src/heads.py` | linear + fixed MLP heads |
 | `src/train.py` | single-run training loop + early stopping |
@@ -40,7 +41,7 @@ pip freeze > requirements.lock.txt      # lock the resolved versions
 
 1. Repo + env + scaffold  ← **done**
 2. `data.py` — datasets, splits, label cleaning, base rates  ← **done** (all splits match PROTOCOL §5 exactly)
-3. `embed.py` — verify L2-norm + determinism, cache embeddings
+3. `embed.py` — verify L2-norm + determinism, cache embeddings  ← code + local verify **done**; full encode runs on Colab (`notebooks/embed_colab.ipynb`)
 4. Smoke test — one cell (C1, NLI, linear, seed 0) end to end
 5. Pilot — 3 seeds, linear head, full 10×3 grid (90 runs), sanity checks only
 6. Full grid — 10 seeds, both heads (600 runs)
