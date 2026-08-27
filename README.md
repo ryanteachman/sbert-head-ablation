@@ -29,21 +29,27 @@ pip freeze > requirements.lock.txt      # lock the resolved versions
 | `src/data.py` | download datasets, clean labels, carve QQP val split (Phase 2) |
 | `src/embed.py` | load frozen backbone, dedup + encode + cache as fp16 `.npz` (Phase 3) |
 | `notebooks/embed_colab.ipynb` | run Phase 3 on Colab GPU, embeddings → Google Drive |
-| `src/features.py` | build C0–C9 feature vectors, standardization, random projection |
+| `src/features.py` | build C0–C9 feature vectors, per-block standardization, random projection |
 | `src/heads.py` | linear + fixed MLP heads |
-| `src/train.py` | single-run training loop + early stopping |
-| `src/run_grid.py` | orchestrate the 600-run grid → `results/runs.parquet` |
-| `src/analyze.py` | primary family + corrections + effect sizes; factorial; figures |
-| `data/`, `embeddings/`, `results/` | regenerated artifacts (gitignored) |
+| `src/train.py` | single grid cell: train head, early-stop, evaluate |
+| `src/run_grid.py` | orchestrate the grid (`--pilot` = 90 cells, full = 600) → `results/*.parquet` |
+| `src/analyze.py` | primary family + corrections + effect sizes; factorial; figures (Phase 7) |
+| `scripts/smoke_pipeline.py` | offline plumbing check on synthetic embeddings |
+| `notebooks/pilot_colab.ipynb` | Phase 4-5 smoke test + pilot on Colab |
+| `data/`, `embeddings/`, `results/{figures,tables}/` | regenerated artifacts (gitignored); `results/*.parquet` IS tracked |
 | `ECE684_Paraphrase/` | prior BetBank code, reference only (gitignored) |
 
 ## Execution phases (see PROTOCOL.md §17)
 
 1. Repo + env + scaffold  ← **done**
 2. `data.py` — datasets, splits, label cleaning, base rates  ← **done** (all splits match PROTOCOL §5 exactly)
-3. `embed.py` — verify L2-norm + determinism, cache embeddings  ← code + local verify **done**; full encode runs on Colab (`notebooks/embed_colab.ipynb`)
-4. Smoke test — one cell (C1, NLI, linear, seed 0) end to end
-5. Pilot — 3 seeds, linear head, full 10×3 grid (90 runs), sanity checks only
-6. Full grid — 10 seeds, both heads (600 runs)
-7. `analyze.py` — stats, tables, figures
+3. `embed.py` — verify L2-norm + determinism, cache embeddings  ← code + local verify **done**; full encode on Colab (`notebooks/embed_colab.ipynb`)
+4. Smoke test — one cell (C1, NLI, linear, seed 0) end to end  ← code **done** (`scripts/smoke_pipeline.py` offline; real run in `notebooks/pilot_colab.ipynb`)
+5. Pilot — 3 seeds, linear head, full 10×3 grid (90 runs), sanity checks only  ← code **done** (`run_grid.py --pilot`)
+6. Full grid — 10 seeds, both heads (600 runs)  ← code **done** (`run_grid.py`)
+7. `analyze.py` — stats, tables, figures  ← local, off `results/*.parquet`
 8. `paper/` — draft
+
+**Compute:** phases 3-6 run on Colab (see `notebooks/`), reading/writing a Google
+Drive folder; only the small `results/*.parquet` comes back to the repo. Phases
+7-8 run locally.
