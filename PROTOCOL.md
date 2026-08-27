@@ -10,9 +10,10 @@ after any results are seen. Deviations get logged in §20 with date and reason.
 
 ## 1. Research question
 
-In an SBERT-style classifier head, does concatenating the element-wise product
-`u*v` with the absolute difference `|u−v|` improve downstream classification
-accuracy over either vector used alone?
+In an SBERT-style classifier head, does an input of `[u, v, |u−v|, u*v]` —
+carrying **both** the element-wise product `u*v` and the absolute difference
+`|u−v|` — improve downstream classification accuracy over carrying just one of
+them (`[u, v, |u−v|]` or `[u, v, u*v]`)?
 
 Secondary: is any observed gain attributable to the *information* in `u*v` or
 merely to the *added head capacity* of a wider feature vector? And is the useful
@@ -31,7 +32,8 @@ the same question:
    not to backbone compensation.
 2. **Direct downstream accuracy** on NLI/QQP/PAWS rather than an STS/cosine proxy.
 3. **Parameter-count-matched random-feature controls** (one per direction), so a
-   "concat wins" result can be attributed to information rather than capacity.
+   win for the both-terms head can be attributed to information rather than
+   capacity.
 4. **Paired significance testing across seeds** with effect sizes, rather than
    seed-averaging alone.
 
@@ -66,9 +68,9 @@ column):
 | ID | Feature vector | Input dim¹ | Role |
 |----|----------------|-----------|------|
 | **C0** | `[u, v]` | 1536 | baseline; factorial cell (no interaction, +uv) |
-| **C1** | `[u, v, \|u−v\|]` | 2304 | **PRIMARY** — difference only |
-| **C2** | `[u, v, u*v]` | 2304 | **PRIMARY** — product only |
-| **C3** | `[u, v, \|u−v\|, u*v]` | 3072 | **PRIMARY** — concatenated |
+| **C1** | `[u, v, \|u−v\|]` | 2304 | **PRIMARY** — difference term only |
+| **C2** | `[u, v, u*v]` | 2304 | **PRIMARY** — product term only |
+| **C3** | `[u, v, \|u−v\|, u*v]` | 3072 | **PRIMARY** — both interaction terms |
 | **C4** | `[u, v, \|u−v\|, rand]` | 3072 | capacity-matched random control for C3 |
 | **C5** | `[\|u−v\|, u*v]` | 1536 | BetBank's actual head; factorial cell |
 | **C6** | `[\|u−v\|]` | 768 | factorial cell; SBERT Table 6 row |
@@ -77,6 +79,12 @@ column):
 | **C9** | `[u, v, u*v, rand]` | 3072 | capacity-matched random control for C3 vs C2 |
 
 ¹ mpnet embedding dim = 768.
+
+**Naming.** C3 (`[u, v, \|u−v\|, u*v]`) carries **both interaction terms** — the
+absolute difference `|u−v|` and the element-wise product `u*v`. C1 and C2 are its
+single-term ablations (difference-only, product-only). We refer to C3 as the
+**both-terms head**, not "the concatenated head": every condition here
+concatenates several blocks, so that label would not distinguish C3.
 
 **Grid:** 10 conditions × 3 datasets × 2 head types × 10 seeds = **600 runs**.
 All runs are small heads trained on cached frozen embeddings.
@@ -103,7 +111,7 @@ published splits only — no custom splits, no cross-validation.
 
 ### 5.1 NLI (3-way: entailment / neutral / contradiction)
 
-- **Train:** SNLI train + MultiNLI train, concatenated. Drop pairs with
+- **Train:** SNLI train + MultiNLI train, pooled. Drop pairs with
   `gold_label == "-"`. Expected ≈ 550,152 + 392,702 minus "-" ≈ **~942k**.
 - **Early-stopping / model-selection split:** SNLI dev, drop "-" (≈ 9,842).
 - **Held-out test:** SNLI test, drop "-" (≈ 9,824). Reported as the headline NLI
@@ -394,10 +402,10 @@ the full run.
 ### 13.1 Supported (given significant, sign-consistent results)
 
 - **If C3 > C1 and C3 > C4:** with a frozen `all-mpnet-base-v2` encoder and a
-  linear classifier, concatenating `u*v` with `|u−v|` gives a small but reliable
-  downstream-accuracy gain over `|u−v|` alone that exceeds a parameter-matched
-  random-feature control — i.e., it reflects complementary information, not head
-  capacity.
+  linear classifier, adding `u*v` alongside `|u−v|` (the both-terms head) gives a
+  small but reliable downstream-accuracy gain over `|u−v|` alone that exceeds a
+  parameter-matched random-feature control — i.e., it reflects complementary
+  information, not head capacity.
 - **If C3 ≈ C1 or C3 ≯ C4:** no reliable benefit from `u*v` once `|u−v|` is
   present in this regime; confirms/sharpens SBERT Table 6.
 - Dataset-level pattern description (with only 3 datasets: descriptive, not a
@@ -425,8 +433,8 @@ the full run.
 - Generalization beyond English sentence-pair semantic classification.
 - Leaderboard-relative magnitude — frozen embeddings sit below fine-tuned SOTA;
   we measure deltas between head conditions, framed as such.
-- Practical "you should use concat" — effect sizes are reported; the reader
-  judges whether a small gain justifies a 33% wider head.
+- Practical "you should always include `u*v`" — effect sizes are reported; the
+  reader judges whether a small gain justifies a 33% wider head.
 - Strong null claims — n = 10 is modest; report CIs and MDE.
 
 ---

@@ -1,9 +1,10 @@
 # SBERT Classifier-Head Ablation (`|u−v|` vs `u*v`)
 
-A controlled ablation isolating whether concatenating an element-wise product
-vector `u*v` with the absolute difference `|u−v|` in an SBERT-style classifier
-head improves downstream classification accuracy, using a **frozen**
-`all-mpnet-base-v2` backbone and direct evaluation on NLI / QQP / PAWS.
+A controlled ablation isolating whether an SBERT-style classifier head fed
+`[u, v, |u−v|, u*v]` — carrying **both** the element-wise product `u*v` and the
+absolute difference `|u−v|` — beats feeding just one of the two interaction
+terms, using a **frozen** `all-mpnet-base-v2` backbone and direct evaluation on
+NLI / QQP / PAWS.
 
 **Read [`PROTOCOL.md`](PROTOCOL.md) first** — it is the frozen pre-registration
 and the single source of truth for every design decision. `config/experiment.yaml`
