@@ -1,0 +1,25 @@
+# Python 3.11+. Install torch first with the wheel matching your cluster's CUDA:
+#   pip install torch==2.8.0 --index-url https://download.pytorch.org/whl/cu124
+# then: pip install -r requirements.txt
+#
+# Versions below are a starting point (mirrors the known-good ECE684 stack plus
+# datasets / pyarrow / statsmodels). Lock exact resolved versions after the first
+# clean install: pip freeze > requirements.lock.txt
+
+torch==2.8.0
+sentence-transformers==5.1.2
+transformers==4.57.1
+datasets==4.0.0
+huggingface-hub==0.36.0
+
+numpy==2.3.3
+pandas==2.3.3
+pyarrow==17.0.0
+
+scikit-learn==1.7.2
+scipy==1.16.3
+statsmodels==0.14.4
+
+matplotlib==3.10.6
+PyYAML==6.0.3
+tqdm==4.67.1

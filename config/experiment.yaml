@@ -1,0 +1,112 @@
+# ---------------------------------------------------------------------------
+# Frozen experiment configuration. Mirrors PROTOCOL.md. Do not change values
+# after results exist without logging a deviation in PROTOCOL.md section 20.
+# ---------------------------------------------------------------------------
+
+seed_base: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]   # full run
+pilot_seeds: [0, 1, 2]                       # Phase 5, linear head only
+
+paths:
+  data_dir: data                # raw + processed datasets (gitignored)
+  embed_dir: embeddings         # cached frozen embeddings (gitignored)
+  results_dir: results          # runs.parquet, tables/, figures/
+
+backbone:
+  model: sentence-transformers/all-mpnet-base-v2
+  revision: null                # pinned in Phase 3 after verification
+  frozen: true
+  max_seq_length: 384           # model default
+  encode_batch_size: 256
+  expect_l2_normalized: true    # verified in Phase 3; else normalize explicitly
+  embedding_dim: 768
+
+# ------------------------------- conditions --------------------------------
+# feature blocks: u, v, diff = |u-v|, prod = u*v, absprod = |u*v|,
+#                 rand = randproj(concat(u,v)) -> 768 dims, W_r ~ N(0, 1/1536),
+#                 redrawn per seed; C4 and C9 share W_r for a given seed.
+conditions:
+  C0: [u, v]
+  C1: [u, v, diff]
+  C2: [u, v, prod]
+  C3: [u, v, diff, prod]
+  C4: [u, v, diff, rand]
+  C5: [diff, prod]
+  C6: [diff]
+  C7: [prod]
+  C8: [u, v, diff, absprod]
+  C9: [u, v, prod, rand]
+
+standardize_blocks: true        # per-dim z-score on the training split
+
+# --------------------------------- heads -----------------------------------
+heads:
+  linear:   {type: linear}                              # PRIMARY
+  mlp:      {type: mlp, hidden: 256, activation: relu,   # SECONDARY (robustness)
+             dropout: 0.1, weight_decay: 1.0e-4}
+
+# ------------------------------- training ----------------------------------
+train:
+  optimizer: adamw
+  betas: [0.9, 0.999]
+  eps: 1.0e-8
+  lr: 1.0e-3                     # constant, no schedule (see PROTOCOL 9)
+  weight_decay_linear: 0.0
+  batch_size: 256
+  max_epochs: 30                # raise if a cell early-stops at the ceiling
+  grad_clip_norm: 1.0
+  loss: cross_entropy           # no class weighting
+  precision: fp32
+  eval_every_frac_epoch: 0.5
+  early_stopping:
+    monitor: val_accuracy       # tie-break: lower val_loss
+    patience_evals: 5
+    restore_best: true
+
+# ------------------------------- datasets ----------------------------------
+datasets:
+  nli:
+    task_type: multiclass
+    num_classes: 3
+    label_map: {entailment: 0, neutral: 1, contradiction: 2}
+    train_sources: [snli/train, multi_nli/train]
+    drop_labels: ["-"]
+    val_split: snli/validation          # model selection only
+    test_split: snli/test               # headline
+    secondary_test: [multi_nli/validation_matched, multi_nli/validation_mismatched]
+    text_fields: [premise, hypothesis]  # u, v (order preserved)
+    hf: {snli: stanfordnlp/snli, multi_nli: nyu-mll/multi_nli}
+  qqp:
+    task_type: binary
+    num_classes: 2
+    label_map: {not_duplicate: 0, duplicate: 1}
+    train_source: glue/qqp/train
+    val_from_train: {fraction: 0.05, stratified: true, seed: 0}  # fixed, seed-independent
+    test_split: glue/qqp/validation     # GLUE test labels hidden
+    text_fields: [question1, question2]
+    report_f1: positive
+    hf: {glue: nyu-mll/glue, config: qqp}
+  paws:
+    task_type: binary
+    num_classes: 2
+    label_map: {0: 0, 1: 1}
+    config: labeled_final
+    train_split: train
+    val_split: validation
+    test_split: test
+    text_fields: [sentence1, sentence2]
+    hf: {paws: google-research-datasets/paws}
+
+# ------------------------------ statistics ---------------------------------
+stats:
+  primary_family:                # linear head, accuracy, per dataset
+    - {name: H1,  a: C3, b: C1}
+    - {name: H1c, a: C3, b: C4}
+    - {name: H2,  a: C3, b: C2}
+    - {name: H2c, a: C3, b: C9}
+  correction: holm               # over 4 contrasts x 3 datasets = 12
+  alpha: 0.05
+  tests: [paired_t, wilcoxon]
+  confirm_rule: "holm-corrected paired-t p<0.05 AND wilcoxon sign-agree uncorrected p<0.05"
+  effect_size: cohen_dz
+  seed_bootstrap_resamples: 10000
+  testset_bootstrap_resamples: 10000
