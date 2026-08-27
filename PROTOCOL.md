@@ -1,8 +1,8 @@
 # Experimental Protocol — SBERT Classifier-Head Ablation (`|u−v|` vs `u*v`)
 
-**Status:** frozen draft for review. All §18 design decisions are resolved.
-Once the full document is approved, the values here are fixed and are not changed
-after any results are seen. Deviations get logged in §20 with date and reason.
+**Status:** APPROVED / frozen (2026-08-27). All §18 design decisions are
+resolved. The values here are fixed and are not changed after any results are
+seen. Deviations get logged in §20 with date and reason.
 
 **Last updated:** 2026-08-27
 

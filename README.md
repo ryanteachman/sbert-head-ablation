@@ -39,7 +39,7 @@ pip freeze > requirements.lock.txt      # lock the resolved versions
 ## Execution phases (see PROTOCOL.md §17)
 
 1. Repo + env + scaffold  ← **done**
-2. `data.py` — datasets, splits, label cleaning, base rates
+2. `data.py` — datasets, splits, label cleaning, base rates  ← **done** (all splits match PROTOCOL §5 exactly)
 3. `embed.py` — verify L2-norm + determinism, cache embeddings
 4. Smoke test — one cell (C1, NLI, linear, seed 0) end to end
 5. Pilot — 3 seeds, linear head, full 10×3 grid (90 runs), sanity checks only

@@ -11,6 +11,7 @@ sentence-transformers==5.1.2
 transformers==4.57.1
 datasets==4.0.0
 huggingface-hub==0.36.0
+hf_xet==1.2.0                  # faster HF downloads (Xet-backed repos)
 
 numpy==2.3.3
 pandas==2.3.3
