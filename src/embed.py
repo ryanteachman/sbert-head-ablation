@@ -21,11 +21,15 @@ import argparse
 import json
 import math
 import os
+import shutil
 import sys
 import tempfile
 import time
 from datetime import datetime, timezone
 from pathlib import Path
+
+# Reduce CUDA fragmentation on small GPUs (must be set before torch inits CUDA).
+os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 
 import numpy as np
 import pandas as pd
@@ -158,17 +162,41 @@ def verify(cfg: dict, device: str) -> int:
 _ENCODE_CHUNK = 100_000          # sentences per encode+cast pass (caps peak RAM)
 
 
-def encode_unique(model, sentences: list[str], batch_size: int, dtype: str):
-    """Encode in chunks: cast each chunk to the storage dtype immediately so the
-    full fp32 matrix is never held (a 1.15M-row fp32 array is ~3.5 GB)."""
+def _chunk_span(ci: int, n: int) -> tuple[int, int]:
+    return ci * _ENCODE_CHUNK, min((ci + 1) * _ENCODE_CHUNK, n)
+
+
+def encode_unique(model, sentences: list[str], batch_size: int, dtype: str,
+                  work_dir: Path | None = None):
+    """Encode in 100k-sentence chunks; cast each to the storage dtype at once so
+    the full fp32 matrix (~3.5 GB for NLI) is never held.
+
+    With ``work_dir``, each finished chunk is written there as ``chunk_<i>.npy``
+    plus a ``state.json`` — so an OOM / disconnect resumes from the last chunk
+    instead of restarting the whole split.
+    """
     n = len(sentences)
     n_chunks = math.ceil(n / _ENCODE_CHUNK)
     store = np.float16 if dtype == "float16" else np.float32
-    out = None
-    max_dev = 0.0
-    explicit = False
+    cuda = torch.cuda.is_available()
+
+    ck = Path(work_dir) if work_dir else None
+    st_path = ck / "state.json" if ck else None
+    st = json.loads(st_path.read_text()) if st_path and st_path.exists() else {}
+    done = set(st.get("done", []))
+    max_dev = float(st.get("max_dev", 0.0))
+    explicit = bool(st.get("explicit", False))
+    dim = st.get("dim")
+    if ck:
+        ck.mkdir(parents=True, exist_ok=True)
+
+    out = None                                    # in-memory accumulator (ck is None)
     for ci in range(n_chunks):
-        s, e = ci * _ENCODE_CHUNK, min((ci + 1) * _ENCODE_CHUNK, n)
+        s, e = _chunk_span(ci, n)
+        if ci in done and ck and (ck / f"chunk_{ci}.npy").exists():
+            if n_chunks > 1:
+                print(f"    chunk {ci + 1}/{n_chunks}  (cached)", flush=True)
+            continue
         if n_chunks > 1:
             print(f"    chunk {ci + 1}/{n_chunks}  ({e - s:,} sentences)", flush=True)
         block = model.encode(sentences[s:e], batch_size=batch_size, convert_to_numpy=True,
@@ -180,9 +208,27 @@ def encode_unique(model, sentences: list[str], batch_size: int, dtype: str):
         if dev >= NORM_TOL:                       # PROTOCOL section 6 fallback
             explicit = True
             block = block / norms[:, None]
-        if out is None:
-            out = np.empty((n, block.shape[1]), dtype=store)
-        out[s:e] = block
+        block = block.astype(store)
+        dim = block.shape[1]
+        if ck:
+            np.save(ck / f"chunk_{ci}.npy", block)
+            done.add(ci)
+            st_path.write_text(json.dumps({"done": sorted(done), "max_dev": max_dev,
+                                           "explicit": explicit, "dim": dim,
+                                           "n_chunks": n_chunks}))
+        else:
+            if out is None:
+                out = np.empty((n, dim), dtype=store)
+            out[s:e] = block
+        del block
+        if cuda:
+            torch.cuda.empty_cache()
+
+    if ck:                                        # assemble from chunk files
+        out = np.empty((n, dim), dtype=store)
+        for ci in range(n_chunks):
+            s, e = _chunk_span(ci, n)
+            out[s:e] = np.load(ck / f"chunk_{ci}.npy")
     return out, max_dev, explicit
 
 
@@ -258,7 +304,8 @@ def run(cfg: dict, device: str, datasets: list[str], only_splits: set[str] | Non
             t0 = time.time()
             sents, idx_a, idx_b = _pair_indices(df)
             print(f"encode {key}  ({len(df):,} pairs, {len(sents):,} unique)", flush=True)
-            emb, dev, expl = encode_unique(model, sents, batch_size, dtype)
+            work = embed_dir / dataset / f"_wip_{split}"
+            emb, dev, expl = encode_unique(model, sents, batch_size, dtype, work_dir=work)
             print(f"  encoded in {time.time() - t0:.0f}s | norm dev {dev:.1e}"
                   + ("  [explicit-normalized]" if expl else ""), flush=True)
 
@@ -266,6 +313,7 @@ def run(cfg: dict, device: str, datasets: list[str], only_splits: set[str] | Non
             print(f"  saving {out.name} ({emb.nbytes / 1e6:.0f} MB)...", flush=True)
             _save_npz(out, uniq_emb=emb, idx_a=idx_a, idx_b=idx_b,
                       label=df["label"].to_numpy(np.int64))
+            shutil.rmtree(work, ignore_errors=True)
             meta["splits"][key] = {
                 "n_pairs": int(len(df)), "n_unique": int(emb.shape[0]),
                 "max_norm_dev": dev, "explicit_normalization": bool(expl),
@@ -289,11 +337,15 @@ def main() -> int:
     ap.add_argument("--device", default="auto", choices=["auto", "cuda", "cpu"])
     ap.add_argument("--dtype", default="float16", choices=["float16", "float32"],
                     help="cache storage dtype (encoding + norm check are always fp32)")
+    ap.add_argument("--encode-batch", type=int, default=None,
+                    help="override encode_batch_size (lower it if the GPU OOMs)")
     ap.add_argument("--force", action="store_true", help="re-encode splits even if cached")
     args = ap.parse_args()
 
     cfg = _cfg()
     device = _device(args.device)
+    if args.encode_batch:
+        cfg["backbone"]["encode_batch_size"] = args.encode_batch
 
     if args.verify:
         return verify(cfg, device)

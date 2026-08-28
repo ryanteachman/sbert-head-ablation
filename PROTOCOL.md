@@ -169,10 +169,11 @@ published splits only — no custom splits, no cross-validation.
   norm `u`, `v` are part of the fixed protocol (the scale of `|u−v|` and `u*v`
   depends on it).
 - **Precision:** encoding and the unit-norm check run in fp32. **Encode batch
-  size:** 512 (throughput only — mean-pool + normalize + the transformer forward
-  are per-sentence, so the cached embedding of a sentence does not depend on
-  batch size). Max sequence length: model default (384). Encoding is done in
-  sentence chunks of 100k so the full fp32 matrix is never materialized.
+  size:** 256 (throughput only — masked mean-pool + normalize + the masked
+  transformer forward are per-sentence, so a sentence's cached embedding does not
+  depend on batch composition). Max sequence length: model default (384).
+  Encoding is done in 100k-sentence chunks (each checkpointed to disk so an
+  OOM/disconnect resumes mid-split); the full fp32 matrix is never materialized.
 - **Determinism:** fixed RNG seeds; `torch.use_deterministic_algorithms(True)`
   where feasible. Encoding in `eval()` mode is deterministic regardless.
   Verification: encode one batch twice, assert bit-identical. (Confirmed
@@ -633,13 +634,12 @@ bias any C-vs-C contrast.
    from the cache. `embed.py --dtype float32` remains available as a robustness
    check if a reviewer wants one.
 
-3. **Encode batch size 256 → 512**, and encoding done in 100k-sentence chunks.
-   Throughput/memory only: mean pooling with an attention mask, L2 Normalize, and
-   the masked transformer forward are all per-sentence, so a sentence's embedding
-   does not depend on batch composition (float-accumulation order aside, ~1e-7).
-   A few small NLI eval splits (`mnli_val_matched`, `mnli_val_mismatched`,
-   `test`) were encoded at batch 256 before this change and left cached; the
-   remaining splits at 512. Equivalent by the same per-sentence argument.
+3. **Encoding done in 100k-sentence chunks, checkpointed to disk**, at the
+   protocol's `encode_batch_size` of 256. (A brief bump to 512 was tried and
+   reverted — it OOM'd a 16 GB T4 on NLI's long sequences.) Memory/robustness
+   only: masked mean-pool, L2 Normalize, and the masked transformer forward are
+   per-sentence, so chunking does not change any embedding (float-accumulation
+   order aside, ~1e-7).
 
 The pilot-gated `max_epochs` / LR-schedule contingencies in §9 are pre-registered
 and are **not** deviations if triggered.

@@ -16,7 +16,9 @@ backbone:
   revision: null                # pinned in Phase 3 after verification
   frozen: true
   max_seq_length: 384           # model default
-  encode_batch_size: 512        # throughput only (per-sentence output is batch-invariant)
+  encode_batch_size: 256        # throughput only (per-sentence output is batch-invariant);
+                                # 256 fits a 16 GB T4 with NLI's long sequences
+
   expect_l2_normalized: true    # verified in Phase 3; else normalize explicitly
   embedding_dim: 768
   cache_dtype: float16          # encoding + norm check are fp32; cache stored fp16
