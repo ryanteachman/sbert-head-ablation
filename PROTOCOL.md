@@ -623,9 +623,10 @@ bias any C-vs-C contrast.
    `all-mpnet-base-v2` forward pass differs by ~1e-6 across torch versions and
    between CPU and GPU — below the fp16 cache precision. `embeddings/meta.json`
    records the exact torch build and the model commit
-   (`e8c3b32edf5434bc2275fc9bab85f82640a19130`) and per-split max ‖emb‖−1
-   (~1.2e-7, i.e. the Normalize module is active and no explicit renormalization
-   was needed).
+   (`e8c3b32edf5434bc2275fc9bab85f82640a19130`).
+   **Completed 2026-08-28** (T4, `torch 2.11.0+cu128`): all 11 splits, pair
+   counts exact to §5, max ‖emb‖−1 ≤ 1.8e-7 on every split, `explicit_
+   normalization: false` throughout (the Normalize module was active), 2.84 GB.
 
 2. **fp16 embedding cache** (added in the Phase 3 commit, just after the APPROVED
    stamp; already documented in §6). fp32 encode + unit-norm check, fp16 storage
