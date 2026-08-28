@@ -608,4 +608,38 @@ SBERT/
 
 ## 20. Protocol deviations
 
-_(none yet — log dated entries here as they occur)_
+### 2026-08-28 — embedding precompute: environment and precision
+
+None of the following change the study's core (conditions, datasets, splits,
+heads, training hyperparameters, statistical plan, and seeds are all unchanged).
+Each affects only the cached backbone embeddings, and each effect is applied
+**identically to every sentence and therefore every condition**, so it cannot
+bias any C-vs-C contrast.
+
+1. **Backbone run on `torch 2.11.0+cu128` on a Colab T4 GPU**, not the pinned
+   `torch==2.8.0` and not the CPU used for local verification. Reason: the
+   embedding precompute must run on Colab (local disk is full; §15). The
+   `all-mpnet-base-v2` forward pass differs by ~1e-6 across torch versions and
+   between CPU and GPU — below the fp16 cache precision. `embeddings/meta.json`
+   records the exact torch build and the model commit
+   (`e8c3b32edf5434bc2275fc9bab85f82640a19130`) and per-split max ‖emb‖−1
+   (~1.2e-7, i.e. the Normalize module is active and no explicit renormalization
+   was needed).
+
+2. **fp16 embedding cache** (added in the Phase 3 commit, just after the APPROVED
+   stamp; already documented in §6). fp32 encode + unit-norm check, fp16 storage
+   (5.6 GB → 2.8 GB). ~1e-3 relative quantization, uniform across conditions;
+   block standardization and the `|u−v|` / `u*v` features are recomputed in fp32
+   from the cache. `embed.py --dtype float32` remains available as a robustness
+   check if a reviewer wants one.
+
+3. **Encode batch size 256 → 512**, and encoding done in 100k-sentence chunks.
+   Throughput/memory only: mean pooling with an attention mask, L2 Normalize, and
+   the masked transformer forward are all per-sentence, so a sentence's embedding
+   does not depend on batch composition (float-accumulation order aside, ~1e-7).
+   A few small NLI eval splits (`mnli_val_matched`, `mnli_val_mismatched`,
+   `test`) were encoded at batch 256 before this change and left cached; the
+   remaining splits at 512. Equivalent by the same per-sentence argument.
+
+The pilot-gated `max_epochs` / LR-schedule contingencies in §9 are pre-registered
+and are **not** deviations if triggered.
