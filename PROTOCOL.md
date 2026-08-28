@@ -169,7 +169,10 @@ published splits only — no custom splits, no cross-validation.
   norm `u`, `v` are part of the fixed protocol (the scale of `|u−v|` and `u*v`
   depends on it).
 - **Precision:** encoding and the unit-norm check run in fp32. **Encode batch
-  size:** 256. Max sequence length: model default (384).
+  size:** 512 (throughput only — mean-pool + normalize + the transformer forward
+  are per-sentence, so the cached embedding of a sentence does not depend on
+  batch size). Max sequence length: model default (384). Encoding is done in
+  sentence chunks of 100k so the full fp32 matrix is never materialized.
 - **Determinism:** fixed RNG seeds; `torch.use_deterministic_algorithms(True)`
   where feasible. Encoding in `eval()` mode is deterministic regardless.
   Verification: encode one batch twice, assert bit-identical. (Confirmed

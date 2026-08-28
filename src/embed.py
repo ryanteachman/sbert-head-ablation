@@ -19,8 +19,11 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
+import os
 import sys
 import tempfile
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -152,26 +155,75 @@ def verify(cfg: dict, device: str) -> int:
 
 
 # ---------------------------------------------------------------------------- run
-def encode_split(model, df: pd.DataFrame, batch_size: int, dtype: str):
+_ENCODE_CHUNK = 100_000          # sentences per encode+cast pass (caps peak RAM)
+
+
+def encode_unique(model, sentences: list[str], batch_size: int, dtype: str):
+    """Encode in chunks: cast each chunk to the storage dtype immediately so the
+    full fp32 matrix is never held (a 1.15M-row fp32 array is ~3.5 GB)."""
+    n = len(sentences)
+    n_chunks = math.ceil(n / _ENCODE_CHUNK)
+    store = np.float16 if dtype == "float16" else np.float32
+    out = None
+    max_dev = 0.0
+    explicit = False
+    for ci in range(n_chunks):
+        s, e = ci * _ENCODE_CHUNK, min((ci + 1) * _ENCODE_CHUNK, n)
+        if n_chunks > 1:
+            print(f"    chunk {ci + 1}/{n_chunks}  ({e - s:,} sentences)", flush=True)
+        block = model.encode(sentences[s:e], batch_size=batch_size, convert_to_numpy=True,
+                             show_progress_bar=True, normalize_embeddings=False)
+        block = np.asarray(block, dtype=np.float32)
+        norms = np.linalg.norm(block, axis=1)
+        dev = float(np.abs(norms - 1.0).max())
+        max_dev = max(max_dev, dev)
+        if dev >= NORM_TOL:                       # PROTOCOL section 6 fallback
+            explicit = True
+            block = block / norms[:, None]
+        if out is None:
+            out = np.empty((n, block.shape[1]), dtype=store)
+        out[s:e] = block
+    return out, max_dev, explicit
+
+
+def _pair_indices(df: pd.DataFrame):
     sents = pd.unique(pd.concat([df["text_a"], df["text_b"]], ignore_index=True))
     pos = pd.Series(np.arange(len(sents), dtype=np.int32), index=sents)
     idx_a = pos.reindex(df["text_a"]).to_numpy(np.int32)
     idx_b = pos.reindex(df["text_b"]).to_numpy(np.int32)
-    emb = _encode(model, list(sents), batch_size)          # float32
+    return list(sents), idx_a, idx_b
 
-    max_norm_dev, _ = _norm_report(emb)                    # checked in fp32
-    explicit_norm = max_norm_dev >= NORM_TOL
-    if explicit_norm:                                      # PROTOCOL section 6 fallback
-        emb = emb / np.linalg.norm(emb, axis=1, keepdims=True)
-    emb = emb.astype(np.dtype(dtype))                      # storage dtype (default fp16)
-    return emb, idx_a, idx_b, df["label"].to_numpy(np.int64), max_norm_dev, explicit_norm
+
+def _cache_ok(path: Path, expected_pairs: int) -> bool:
+    """A cached .npz counts as done only if it loads and matches the parquet."""
+    try:
+        with np.load(path) as z:
+            return (set(z.files) >= {"uniq_emb", "idx_a", "idx_b", "label"}
+                    and len(z["label"]) == expected_pairs
+                    and len(z["idx_a"]) == expected_pairs
+                    and int(z["idx_a"].max()) < z["uniq_emb"].shape[0])
+    except Exception:
+        return False
+
+
+def _save_npz(out: Path, **arrays) -> None:
+    """Atomic: write to <stem>.tmp.npz, then rename. A kill never leaves a file
+    that looks complete. (tmp keeps the .npz suffix so np.savez doesn't append.)"""
+    out.parent.mkdir(parents=True, exist_ok=True)
+    tmp = out.with_name(out.stem + ".tmp.npz")
+    np.savez(tmp, **arrays)
+    os.replace(tmp, out)
 
 
 def run(cfg: dict, device: str, datasets: list[str], only_splits: set[str] | None,
         embed_dir: Path, force: bool, dtype: str) -> int:
     model, name, modules = _load_model(cfg, device)
     commit = _resolve_commit(name)
-    print(f"device: {device} | model: {name} | commit: {commit}")
+    print(f"device: {device} | model: {name} | commit: {commit} | out: {embed_dir}")
+
+    for stale in embed_dir.rglob("*.tmp.npz"):
+        print(f"removing stale {stale.name}")
+        stale.unlink()
 
     meta_path = embed_dir / "meta.json"
     meta = json.loads(meta_path.read_text()) if meta_path.exists() else {}
@@ -193,24 +245,35 @@ def run(cfg: dict, device: str, datasets: list[str], only_splits: set[str] | Non
             split = f.stem
             if only_splits and split not in only_splits:
                 continue
-            out = embed_dir / dataset / f"{split}.npz"
             key = f"{dataset}/{split}"
-            if out.exists() and not force:
-                print(f"skip  {key}  (cached)")
-                continue
+            out = embed_dir / dataset / f"{split}.npz"
             df = pd.read_parquet(f)
-            print(f"encode {key}  ({len(df):,} pairs)")
-            emb, idx_a, idx_b, label, dev, expl = encode_split(model, df, batch_size, dtype)
-            out.parent.mkdir(parents=True, exist_ok=True)
-            np.savez(out, uniq_emb=emb, idx_a=idx_a, idx_b=idx_b, label=label)
+
+            if out.exists() and not force and _cache_ok(out, len(df)):
+                print(f"skip   {key}  (cached, {len(df):,} pairs)")
+                continue
+            if out.exists():
+                print(f"redo   {key}  (missing/invalid cache)")
+
+            t0 = time.time()
+            sents, idx_a, idx_b = _pair_indices(df)
+            print(f"encode {key}  ({len(df):,} pairs, {len(sents):,} unique)", flush=True)
+            emb, dev, expl = encode_unique(model, sents, batch_size, dtype)
+            print(f"  encoded in {time.time() - t0:.0f}s | norm dev {dev:.1e}"
+                  + ("  [explicit-normalized]" if expl else ""), flush=True)
+
+            t1 = time.time()
+            print(f"  saving {out.name} ({emb.nbytes / 1e6:.0f} MB)...", flush=True)
+            _save_npz(out, uniq_emb=emb, idx_a=idx_a, idx_b=idx_b,
+                      label=df["label"].to_numpy(np.int64))
             meta["splits"][key] = {
                 "n_pairs": int(len(df)), "n_unique": int(emb.shape[0]),
                 "max_norm_dev": dev, "explicit_normalization": bool(expl),
                 "bytes": int(out.stat().st_size),
             }
             meta_path.write_text(json.dumps(meta, indent=2))
-            print(f"  -> {out.relative_to(embed_dir.parent) if embed_dir.parent in out.parents else out}"
-                  f"  ({emb.shape[0]:,} unique, {out.stat().st_size / 1e6:.0f} MB)")
+            print(f"  saved in {time.time() - t1:.0f}s  "
+                  f"({emb.shape[0]:,} unique, {out.stat().st_size / 1e6:.0f} MB)", flush=True)
 
     print("\nmeta.json:")
     print(meta_path.read_text())
