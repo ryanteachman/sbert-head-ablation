@@ -475,10 +475,14 @@ the full run.
 
 ## 15. Compute and experiment tracking
 
-- **Hardware:** single GPU (record model). Embedding precompute is the main cost
-  (NLI: ~1.9M sentence encodes, dedup first). Head training is seconds–minutes
-  per run. Full 600-run grid is feasible within ~1 day after embeddings are
-  cached.
+- **Hardware:** Colab (Pro) — embeddings on a GPU runtime, the grid + analysis on
+  CPU. Embedding precompute (NLI: ~1.9M sentence encodes, dedup first) is the
+  GPU cost. The grid trains only small heads.
+- **Feature cache:** for each `(dataset, condition[, seed if rand])` the
+  standardized feature matrix is built once (`x_train` as a disk memmap, ~11.6 GB
+  for NLI) and reused by all 20 seed×head cells — the per-batch rebuild is ~90%
+  of the cost otherwise. Verified bit-identical to the per-batch path. Brings the
+  full 600-cell grid to ~3–4 h on Colab CPU.
 - **Results store:** one tidy row per run in `results/runs.parquet` — dataset,
   condition, head, seed, all metrics, best-checkpoint step, epochs trained, wall
   time, config hash, git commit.

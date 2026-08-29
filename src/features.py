@@ -119,9 +119,44 @@ class BlockStandardizer:
         return (x - mean) / std
 
 
+def fit_standardizer(condition: str, u16: np.ndarray, v16: np.ndarray,
+                     w_r: np.ndarray | None) -> BlockStandardizer:
+    return BlockStandardizer().fit(u16, v16, CONDITIONS[condition], w_r)
+
+
 # ---------------------------------------------------------------------- assemble
 def assemble(condition: str, u32: np.ndarray, v32: np.ndarray,
              w_r: np.ndarray | None, std: BlockStandardizer) -> np.ndarray:
-    """Standardized feature matrix for `condition`, fp32 [n, d_in(condition)]."""
+    """Standardized feature matrix for a batch, fp32 [n, d_in(condition)]."""
     parts = [std.apply(b, build_block(b, u32, v32, w_r)) for b in CONDITIONS[condition]]
     return np.concatenate(parts, axis=1).astype(np.float32)
+
+
+def standardized_matrix(condition: str, u16: np.ndarray, v16: np.ndarray,
+                        w_r: np.ndarray | None, std: BlockStandardizer,
+                        out_path: str | None = None, chunk: int = 100_000):
+    """Full standardized feature matrix for a split, **fp32**.
+
+    Built once per (dataset, condition[, seed if `rand`]) and reused by every
+    seed/head cell — the per-batch path (`assemble`) recomputes this ~20x
+    otherwise. Row values are identical to `assemble` on the same rows.
+
+    With ``out_path`` the matrix is written as a ``.npy`` and returned as a
+    read-only memmap (keeps RAM flat for NLI's ~11.6 GB train matrix); otherwise
+    an in-memory array is returned (fine for val/test and the small datasets).
+    """
+    n = len(u16)
+    d = EMB_DIM * len(CONDITIONS[condition])
+    if out_path:
+        arr = np.lib.format.open_memmap(out_path, mode="w+", dtype=np.float32, shape=(n, d))
+    else:
+        arr = np.empty((n, d), dtype=np.float32)
+    for s in range(0, n, chunk):
+        e = min(s + chunk, n)
+        u = u16[s:e].astype(np.float32)
+        v = v16[s:e].astype(np.float32)
+        arr[s:e] = assemble(condition, u, v, w_r, std)
+    if out_path:
+        arr.flush()
+        return np.load(out_path, mmap_mode="r")
+    return arr

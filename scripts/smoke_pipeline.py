@@ -45,6 +45,7 @@ def make_fake_cache(root: Path) -> None:
 def run_grid(embed_dir: Path, out: Path) -> pd.DataFrame:
     cmd = [sys.executable, str(ROOT / "src" / "run_grid.py"), "--pilot",
            "--embed-dir", str(embed_dir), "--out", str(out),
+           "--work-dir", str(out.parent / "_featcache"),
            "--datasets", "paws,nli", "--conditions", "C0,C1,C3,C4,C9", "--seeds", "0,1"]
     subprocess.run(cmd, check=True, capture_output=True, text=True)
     return pd.read_parquet(out)

@@ -44,10 +44,10 @@ pip freeze > requirements.lock.txt      # lock the resolved versions
 1. Repo + env + scaffold  ← **done**
 2. `data.py` — datasets, splits, label cleaning, base rates  ← **done** (all splits match PROTOCOL §5 exactly)
 3. `embed.py` — verify L2-norm + determinism, cache embeddings  ← code + local verify **done**; full encode on Colab (`notebooks/embed_colab.ipynb`)
-4. Smoke test — one cell (C1, NLI, linear, seed 0) end to end  ← code **done** (`scripts/smoke_pipeline.py` offline; real run in `notebooks/pilot_colab.ipynb`)
-5. Pilot — 3 seeds, linear head, full 10×3 grid (90 runs), sanity checks only  ← code **done** (`run_grid.py --pilot`)
-6. Full grid — 10 seeds, both heads (600 runs)  ← code **done** (`run_grid.py`)
-7. `analyze.py` — stats, tables, figures  ← local, off `results/*.parquet`
+4. Smoke test — one cell end to end  ← **done** (offline `scripts/smoke_pipeline.py`; real run in pilot notebook)
+5. Pilot — 3 seeds, linear, 90 cells  ← **done** — `results/pilot_runs.parquet`; mechanics/magnitudes/ordering OK
+6. Full grid — 10 seeds, both heads (600 cells)  ← code **done**, feature-cache refactor makes it ~3-4 h; run via `notebooks/full_grid_colab.ipynb`
+7. `analyze.py` — stats, tables, figures  ← **not written**; local, off `results/runs.parquet`
 8. `paper/` — draft
 
 **Compute:** phases 3-6 run on Colab (see `notebooks/`), reading/writing a Google
