@@ -1,20 +1,22 @@
 """Phase 4 — build the C0..C9 classifier-head inputs from cached embeddings.
 
-Given cached unique-sentence embeddings, this module:
-  * gathers per-pair ``u`` and ``v`` (fp16 in memory, upcast to fp32 per batch),
-  * builds feature blocks  ``u``, ``v``, ``diff = |u-v|``, ``prod = u*v``,
+  * gather per-pair ``u`` and ``v`` (fp16) and keep them resident on the run
+    device (GPU when available),
+  * per mini-batch, build blocks  ``u``, ``v``, ``diff = |u-v|``, ``prod = u*v``,
     ``absprod = |u*v|``, ``rand = concat(u,v) @ W_r``  (W_r ~ N(0, 1/1536),
-    768 cols, drawn from the run seed; C4 and C9 share it),
-  * standardizes each block per-dim using **training-split** statistics,
-  * assembles a condition's feature matrix by concatenating its blocks in order.
+    768 cols, drawn from the run seed; C4 and C9 share it) — all in torch,
+  * standardize each block per-dim using **training-split** statistics,
+  * concatenate the condition's blocks in order.
 
-See PROTOCOL.md sections 4 and 7.
+Everything is torch so the per-batch math runs on the GPU. See PROTOCOL.md
+sections 4 and 7.
 """
 from __future__ import annotations
 
 from pathlib import Path
 
 import numpy as np
+import torch
 
 EMB_DIM = 768
 _STD_EPS = 1e-6
@@ -33,16 +35,6 @@ CONDITIONS: dict[str, list[str]] = {
     "C9": ["u", "v", "prod", "rand"],
 }
 
-# Blocks that depend on the per-seed random projection.
-SEED_DEPENDENT_BLOCKS = {"rand"}
-
-
-def blocks_for(conditions: list[str]) -> list[str]:
-    """Union of blocks needed by the given conditions, in a stable order."""
-    order = ["u", "v", "diff", "prod", "absprod", "rand"]
-    needed = {b for c in conditions for b in CONDITIONS[c]}
-    return [b for b in order if b in needed]
-
 
 def d_in(condition: str) -> int:
     return EMB_DIM * len(CONDITIONS[condition])
@@ -51,14 +43,14 @@ def d_in(condition: str) -> int:
 # --------------------------------------------------------------------------- load
 def load_pair_embeddings(embed_dir: Path, dataset: str, split: str
                          ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Return (u, v, label) with u, v as fp16 [n_pairs, 768] and label int64."""
+    """Return (u, v, label): u, v as fp16 [n_pairs, 768], label int64."""
     path = Path(embed_dir) / dataset / f"{split}.npz"
     with np.load(path) as z:
-        uniq = z["uniq_emb"]                       # [n_unique, 768], fp16 or fp32
-        u = np.ascontiguousarray(uniq[z["idx_a"]])
-        v = np.ascontiguousarray(uniq[z["idx_b"]])
+        uniq = z["uniq_emb"]
+        u = np.ascontiguousarray(uniq[z["idx_a"]]).astype(np.float16)
+        v = np.ascontiguousarray(uniq[z["idx_b"]]).astype(np.float16)
         label = z["label"].astype(np.int64)
-    return u.astype(np.float16), v.astype(np.float16), label
+    return u, v, label
 
 
 # ------------------------------------------------------------------- random proj
@@ -71,92 +63,66 @@ def make_rand_projection(seed: int) -> np.ndarray:
 
 
 # ------------------------------------------------------------------------ blocks
-def build_block(name: str, u: np.ndarray, v: np.ndarray,
-                w_r: np.ndarray | None) -> np.ndarray:
-    """u, v are fp32 [n, 768]. Returns fp32 [n, 768]."""
+def build_block(name: str, u: torch.Tensor, v: torch.Tensor,
+                w_r: torch.Tensor | None) -> torch.Tensor:
+    """u, v: fp32 [n, 768] on some device. Returns fp32 [n, 768]."""
     if name == "u":
         return u
     if name == "v":
         return v
     if name == "diff":
-        return np.abs(u - v)
+        return (u - v).abs()
     if name == "prod":
         return u * v
     if name == "absprod":
-        return np.abs(u * v)
+        return (u * v).abs()
     if name == "rand":
-        return np.concatenate([u, v], axis=1) @ w_r
+        return torch.cat([u, v], dim=1) @ w_r
     raise KeyError(name)
 
 
 class BlockStandardizer:
-    """Per-dimension z-score for each block, fit on the training split."""
+    """Per-dimension z-score for each block, fit on the training split.
+    Holds mean/std as fp32 tensors on the run device."""
 
     def __init__(self) -> None:
-        self.stats: dict[str, tuple[np.ndarray, np.ndarray]] = {}
+        self.stats: dict[str, tuple[torch.Tensor, torch.Tensor]] = {}
 
-    def fit(self, u16: np.ndarray, v16: np.ndarray, block_names: list[str],
-            w_r: np.ndarray | None, chunk: int = 100_000) -> "BlockStandardizer":
-        n = len(u16)
-        acc = {b: (np.zeros(EMB_DIM), np.zeros(EMB_DIM)) for b in block_names}
+    @torch.no_grad()
+    def fit(self, u16: torch.Tensor, v16: torch.Tensor, block_names: list[str],
+            w_r: torch.Tensor | None, chunk: int = 200_000) -> "BlockStandardizer":
+        device = u16.device
+        n = u16.shape[0]
+        acc = {b: [torch.zeros(EMB_DIM, dtype=torch.float64, device=device),
+                   torch.zeros(EMB_DIM, dtype=torch.float64, device=device)]
+               for b in block_names}
         for s in range(0, n, chunk):
             e = min(s + chunk, n)
-            u = u16[s:e].astype(np.float32)
-            v = v16[s:e].astype(np.float32)
+            u = u16[s:e].float()
+            v = v16[s:e].float()
             for b in block_names:
-                x = build_block(b, u, v, w_r)
-                acc[b][0][:] += x.sum(axis=0)
-                acc[b][1][:] += (x.astype(np.float64) ** 2).sum(axis=0)
+                x = build_block(b, u, v, w_r).double()
+                acc[b][0] += x.sum(0)
+                acc[b][1] += (x * x).sum(0)
         for b, (ssum, sqsum) in acc.items():
             mean = ssum / n
-            var = np.maximum(sqsum / n - mean ** 2, 0.0)
-            self.stats[b] = (mean.astype(np.float32),
-                             np.sqrt(var + _STD_EPS).astype(np.float32))
+            var = torch.clamp(sqsum / n - mean * mean, min=0.0)
+            self.stats[b] = (mean.float(), torch.sqrt(var + _STD_EPS).float())
         return self
 
-    def apply(self, name: str, x: np.ndarray) -> np.ndarray:
+    def apply(self, name: str, x: torch.Tensor) -> torch.Tensor:
         mean, std = self.stats[name]
         return (x - mean) / std
 
 
-def fit_standardizer(condition: str, u16: np.ndarray, v16: np.ndarray,
-                     w_r: np.ndarray | None) -> BlockStandardizer:
+def fit_standardizer(condition: str, u16: torch.Tensor, v16: torch.Tensor,
+                     w_r: torch.Tensor | None) -> BlockStandardizer:
     return BlockStandardizer().fit(u16, v16, CONDITIONS[condition], w_r)
 
 
 # ---------------------------------------------------------------------- assemble
-def assemble(condition: str, u32: np.ndarray, v32: np.ndarray,
-             w_r: np.ndarray | None, std: BlockStandardizer) -> np.ndarray:
+def assemble(condition: str, u32: torch.Tensor, v32: torch.Tensor,
+             w_r: torch.Tensor | None, std: BlockStandardizer) -> torch.Tensor:
     """Standardized feature matrix for a batch, fp32 [n, d_in(condition)]."""
     parts = [std.apply(b, build_block(b, u32, v32, w_r)) for b in CONDITIONS[condition]]
-    return np.concatenate(parts, axis=1).astype(np.float32)
-
-
-def standardized_matrix(condition: str, u16: np.ndarray, v16: np.ndarray,
-                        w_r: np.ndarray | None, std: BlockStandardizer,
-                        out_path: str | None = None, chunk: int = 100_000):
-    """Full standardized feature matrix for a split, **fp32**.
-
-    Built once per (dataset, condition[, seed if `rand`]) and reused by every
-    seed/head cell — the per-batch path (`assemble`) recomputes this ~20x
-    otherwise. Row values are identical to `assemble` on the same rows.
-
-    With ``out_path`` the matrix is written as a ``.npy`` and returned as a
-    read-only memmap (keeps RAM flat for NLI's ~11.6 GB train matrix); otherwise
-    an in-memory array is returned (fine for val/test and the small datasets).
-    """
-    n = len(u16)
-    d = EMB_DIM * len(CONDITIONS[condition])
-    if out_path:
-        arr = np.lib.format.open_memmap(out_path, mode="w+", dtype=np.float32, shape=(n, d))
-    else:
-        arr = np.empty((n, d), dtype=np.float32)
-    for s in range(0, n, chunk):
-        e = min(s + chunk, n)
-        u = u16[s:e].astype(np.float32)
-        v = v16[s:e].astype(np.float32)
-        arr[s:e] = assemble(condition, u, v, w_r, std)
-    if out_path:
-        arr.flush()
-        return np.load(out_path, mmap_mode="r")
-    return arr
+    return torch.cat(parts, dim=1)

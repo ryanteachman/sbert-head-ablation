@@ -4,12 +4,12 @@
           3 seeds x linear head x 10 conditions x 3 datasets = 90 cells
 
   Full:   python src/run_grid.py --embed-dir <dir>
-          10 seeds x {linear, mlp} x 10 conditions x 3 datasets = 600 cells
+          15 seeds x {linear, mlp} x 10 conditions x 3 datasets = 900 cells
 
-For each (dataset, condition) the standardized feature matrices are built **once**
-(x_train as a disk memmap) and reused by every seed/head cell — the per-batch
-rebuild is ~90% of the cost otherwise. `rand` conditions (C4, C9) rebuild per
-seed since W_r is seed-dependent.
+Per dataset, ``u``/``v`` for every split are loaded once onto the run device
+(GPU when available). Features are then built per mini-batch in torch — the
+block math is free on a GPU. Standardizer stats are fit once per
+(dataset, condition[, seed if `rand`]).
 
 Resumable: cells already in the output parquet are skipped; results flush after
 every cell.
@@ -19,7 +19,6 @@ from __future__ import annotations
 import argparse
 import gc
 import json
-import os
 import sys
 from pathlib import Path
 
@@ -28,9 +27,8 @@ import pandas as pd
 import torch
 import yaml
 
-from features import (CONDITIONS, fit_standardizer, load_pair_embeddings,
-                      make_rand_projection, standardized_matrix)
-from train import FeatureSet, train_one
+from features import CONDITIONS, fit_standardizer, load_pair_embeddings, make_rand_projection
+from train import SplitTensors, train_one
 
 for _s in (sys.stdout, sys.stderr):
     try:
@@ -53,29 +51,13 @@ def _device(req: str) -> str:
     return ("cuda" if torch.cuda.is_available() else "cpu") if req == "auto" else req
 
 
-def _feature_set(condition, w_r, std, raw: dict, work_dir: Path, tag: str) -> FeatureSet:
-    """Build standardized matrices for every split of one (dataset, condition[, seed])."""
-    def mat(split, out_path=None):
-        u16, v16, _ = raw[split]
-        return standardized_matrix(condition, u16, v16, w_r, std, out_path=out_path)
-
-    mm_path = work_dir / f"{tag}_train.npy"
-    return FeatureSet(
-        x_train=mat("train", out_path=str(mm_path)), y_train=raw["train"][2],
-        x_val=mat("val"), y_val=raw["val"][2],
-        x_test=mat("test"), y_test=raw["test"][2],
-        extra={k: (mat(k), raw[k][2]) for k in raw if k in NLI_EXTRA},
+def _load_tensors(embed_dir: Path, dataset: str, split: str, device: str) -> SplitTensors:
+    u16, v16, label = load_pair_embeddings(embed_dir, dataset, split)
+    return SplitTensors(
+        u=torch.from_numpy(u16).to(device),
+        v=torch.from_numpy(v16).to(device),
+        y=label,
     )
-
-
-def _free(feats: FeatureSet, work_dir: Path, tag: str) -> None:
-    del feats
-    gc.collect()
-    p = work_dir / f"{tag}_train.npy"
-    try:
-        p.unlink(missing_ok=True)
-    except OSError:
-        pass                                   # Windows: memmap handle may linger
 
 
 def main() -> int:
@@ -83,8 +65,6 @@ def main() -> int:
     ap.add_argument("--pilot", action="store_true", help="3 seeds, linear head only")
     ap.add_argument("--embed-dir", required=True, help="dir with <dataset>/<split>.npz")
     ap.add_argument("--out", default=str(ROOT / "results" / "runs.parquet"))
-    ap.add_argument("--work-dir", default=str(ROOT / ".featcache"),
-                    help="scratch dir for x_train memmaps (needs ~12 GB free)")
     ap.add_argument("--datasets", default="nli,qqp,paws")
     ap.add_argument("--conditions", default=",".join(CONDITIONS))
     ap.add_argument("--heads", default=None, help="override; default linear (pilot) or linear,mlp")
@@ -98,8 +78,6 @@ def main() -> int:
     embed_dir = Path(args.embed_dir)
     out = Path(args.out)
     out.parent.mkdir(parents=True, exist_ok=True)
-    work_dir = Path(args.work_dir)
-    work_dir.mkdir(parents=True, exist_ok=True)
 
     datasets = [d.strip() for d in args.datasets.split(",") if d.strip()]
     conditions = [c.strip() for c in args.conditions.split(",") if c.strip()]
@@ -129,9 +107,10 @@ def main() -> int:
             continue
         n_classes = int(cfg["datasets"][dataset]["num_classes"])
         splits = ["train", "val", "test"] + (NLI_EXTRA if dataset == "nli" else [])
-        print(f"\n=== {dataset} ({n_classes}-way) — loading embeddings ===", flush=True)
-        raw = {s: load_pair_embeddings(embed_dir, dataset, s) for s in splits}
-        print("    " + " | ".join(f"{s} {len(raw[s][2]):,}" for s in splits), flush=True)
+        print(f"\n=== {dataset} ({n_classes}-way) — loading embeddings to {device} ===", flush=True)
+        T = {s: _load_tensors(embed_dir, dataset, s, device) for s in splits}
+        extra = {k: T[k] for k in NLI_EXTRA if k in T}
+        print("    " + " | ".join(f"{s} {len(T[s].y):,}" for s in splits), flush=True)
 
         for condition in conditions:
             cond_cells = [(h, s) for (_, c, h, s) in ds_cells if c == condition]
@@ -143,19 +122,18 @@ def main() -> int:
                       if has_rand else {None: cond_cells})
 
             for gseed, gcells in groups.items():
-                w_r = make_rand_projection(gseed) if has_rand else None
-                std = fit_standardizer(condition, raw["train"][0], raw["train"][1], w_r)
-                tag = f"{dataset}_{condition}_{gseed}"
-                feats = _feature_set(condition, w_r, std, raw, work_dir, tag)
+                w_r = (torch.from_numpy(make_rand_projection(gseed)).to(device)
+                       if has_rand else None)
+                std = fit_standardizer(condition, T["train"].u, T["train"].v, w_r)
                 print(f"  [{dataset}/{condition}"
                       + (f" seed {gseed}" if has_rand else "")
-                      + f"] features ready (d_in={feats.x_train.shape[1]}), {len(gcells)} cells",
-                      flush=True)
+                      + f"]  {len(gcells)} cells", flush=True)
 
                 for (head, seed) in gcells:
                     row = train_one(cfg, dataset=dataset, condition=condition,
                                     head_kind=head, seed=seed, n_classes=n_classes,
-                                    feats=feats, device=device)
+                                    tr=T["train"], va=T["val"], te=T["test"],
+                                    extra=extra, w_r=w_r, std=std, device=device)
                     row["test_confusion"] = json.dumps(row["test_confusion"])
                     rows.append(row)
                     pd.DataFrame(rows).to_parquet(out, index=False)
@@ -166,30 +144,26 @@ def main() -> int:
                     if args.limit and n_new >= args.limit:
                         stop = True
                         break
-
-                _free(feats, work_dir, tag)
+                del std, w_r
+                if device == "cuda":
+                    torch.cuda.empty_cache()
                 if stop:
                     break
             if stop:
                 break
 
-        del raw
+        del T, extra
         gc.collect()
-
-    for leftover in work_dir.glob("*_train.npy"):
-        try:
-            leftover.unlink()
-        except OSError:
-            pass
+        if device == "cuda":
+            torch.cuda.empty_cache()
 
     print(f"\nwrote {out}  ({len(rows)} rows total, {n_new} new)")
     if n_new:
         df = pd.DataFrame(rows)
-        lin = df[df["head"] == "linear"]
-        if not lin.empty:
-            piv = lin.pivot_table(index="dataset", columns="condition",
-                                  values="test_acc", aggfunc="mean").round(4)
-            print("\nmean linear-head test accuracy (so far):")
+        for h in [x for x in ("linear", "mlp") if x in df["head"].unique()]:
+            piv = df[df["head"] == h].pivot_table(index="dataset", columns="condition",
+                                                  values="test_acc", aggfunc="mean").round(4)
+            print(f"\nmean {h}-head test accuracy (so far):")
             print(piv.to_string())
     return 0
 

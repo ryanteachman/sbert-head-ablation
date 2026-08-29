@@ -5,10 +5,9 @@ and the training-data shuffle order. For a fixed seed the init and shuffle are
 identical across conditions, so per-seed metric differences are paired.
 See PROTOCOL.md sections 9-10.
 
-The standardized feature matrices (``FeatureSet``) are built once per
-(dataset, condition[, seed if `rand`]) by ``run_grid.py`` and passed in — every
-seed/head cell reuses them. The NLI-train matrix (~11.6 GB fp32) is a disk
-memmap; per-batch access is a fancy-index gather.
+Features are built per mini-batch, in torch, on the run device — with ``u``/``v``
+resident on the GPU the block math (`|u-v|`, `u*v`, the projection,
+standardization) is effectively free, so a full grid cell is seconds.
 """
 from __future__ import annotations
 
@@ -21,31 +20,24 @@ import torch
 import torch.nn as nn
 from sklearn.metrics import f1_score
 
-from features import d_in
+from features import CONDITIONS, assemble, d_in
 from heads import make_head, weight_decay_for
 
 
 @dataclass
-class FeatureSet:
-    """Standardized features + labels for one (dataset, condition[, seed])."""
-    x_train: np.ndarray            # [n, d] fp32 (may be a np.memmap)
-    y_train: np.ndarray            # [n] int64
-    x_val: np.ndarray
-    y_val: np.ndarray
-    x_test: np.ndarray
-    y_test: np.ndarray
-    extra: dict[str, tuple[np.ndarray, np.ndarray]]   # name -> (X, y)
+class SplitTensors:
+    u: torch.Tensor          # [n, 768] fp16, on the run device
+    v: torch.Tensor
+    y: np.ndarray            # [n] int64 (CPU)
 
 
 def set_determinism(seed: int) -> None:
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
     torch.use_deterministic_algorithms(True, warn_only=True)
-
-
-def _batch(x: np.ndarray, idx: np.ndarray) -> torch.Tensor:
-    return torch.from_numpy(np.ascontiguousarray(x[idx], dtype=np.float32))
 
 
 def _confusion(y_true: np.ndarray, y_pred: np.ndarray, k: int) -> np.ndarray:
@@ -55,35 +47,37 @@ def _confusion(y_true: np.ndarray, y_pred: np.ndarray, k: int) -> np.ndarray:
 
 
 @torch.no_grad()
-def _evaluate(head: nn.Module, x: np.ndarray, y: np.ndarray, device: str,
-              n_classes: int, batch: int = 8192) -> dict:
+def _evaluate(head: nn.Module, sd: SplitTensors, condition: str, w_r, std,
+              n_classes: int, batch: int = 16384) -> dict:
     head.eval()
-    n = len(y)
+    n = len(sd.y)
     ce = nn.CrossEntropyLoss(reduction="sum")
     preds = np.empty(n, dtype=np.int64)
     total_loss = 0.0
     for s in range(0, n, batch):
         e = min(s + batch, n)
-        sl = np.arange(s, e)
-        logits = head(_batch(x, sl).to(device))
-        total_loss += ce(logits, torch.from_numpy(y[s:e]).to(device)).item()
+        x = assemble(condition, sd.u[s:e].float(), sd.v[s:e].float(), w_r, std)
+        logits = head(x)
+        yb = torch.from_numpy(sd.y[s:e]).to(x.device)
+        total_loss += ce(logits, yb).item()
         preds[s:e] = logits.argmax(1).cpu().numpy()
     head.train()
 
-    acc = float((preds == y).mean())
+    acc = float((preds == sd.y).mean())
     out = {
         "acc": acc,
         "loss": total_loss / n,
-        "macro_f1": float(f1_score(y, preds, average="macro")),
-        "confusion": [[int(v) for v in row] for row in _confusion(y, preds, n_classes)],
+        "macro_f1": float(f1_score(sd.y, preds, average="macro")),
+        "confusion": [[int(v) for v in row] for row in _confusion(sd.y, preds, n_classes)],
     }
     if n_classes == 2:
-        out["pos_f1"] = float(f1_score(y, preds, pos_label=1, average="binary"))
+        out["pos_f1"] = float(f1_score(sd.y, preds, pos_label=1, average="binary"))
     return out
 
 
 def train_one(cfg: dict, *, dataset: str, condition: str, head_kind: str, seed: int,
-              n_classes: int, feats: FeatureSet, device: str = "cpu") -> dict:
+              n_classes: int, tr: SplitTensors, va: SplitTensors, te: SplitTensors,
+              extra: dict[str, SplitTensors], w_r, std, device: str = "cpu") -> dict:
     t0 = time.time()
     tcfg = cfg["train"]
     set_determinism(seed)
@@ -99,7 +93,8 @@ def train_one(cfg: dict, *, dataset: str, condition: str, head_kind: str, seed: 
     ce = nn.CrossEntropyLoss()
     clip = float(tcfg["grad_clip_norm"])
     batch = int(tcfg["batch_size"])
-    n = len(feats.y_train)
+    n = len(tr.y)
+    y_train = torch.from_numpy(tr.y).to(device)
     steps_per_epoch = (n + batch - 1) // batch
     eval_every = max(1, int(steps_per_epoch * float(tcfg["eval_every_frac_epoch"])))
     patience = int(tcfg["early_stopping"]["patience_evals"])
@@ -113,12 +108,11 @@ def train_one(cfg: dict, *, dataset: str, condition: str, head_kind: str, seed: 
 
     for epoch in range(int(tcfg["max_epochs"])):
         epochs_done = epoch + 1
-        perm = torch.randperm(n, generator=gen).numpy()
+        perm = torch.randperm(n, generator=gen).to(device)
         for s in range(0, n, batch):
             idx = perm[s:s + batch]
-            x = _batch(feats.x_train, idx).to(device)
-            y = torch.from_numpy(feats.y_train[idx]).to(device)
-            loss = ce(head(x), y)
+            x = assemble(condition, tr.u[idx].float(), tr.v[idx].float(), w_r, std)
+            loss = ce(head(x), y_train[idx])
             opt.zero_grad(set_to_none=True)
             loss.backward()
             nn.utils.clip_grad_norm_(head.parameters(), clip)
@@ -126,7 +120,7 @@ def train_one(cfg: dict, *, dataset: str, condition: str, head_kind: str, seed: 
             step += 1
 
             if step % eval_every == 0:
-                vm = _evaluate(head, feats.x_val, feats.y_val, device, n_classes)
+                vm = _evaluate(head, va, condition, w_r, std, n_classes)
                 improved = (vm["acc"] > best["val_acc"] + 1e-6) or (
                     abs(vm["acc"] - best["val_acc"]) <= 1e-6 and vm["loss"] < best["val_loss"])
                 if improved:
@@ -145,18 +139,18 @@ def train_one(cfg: dict, *, dataset: str, condition: str, head_kind: str, seed: 
     if best["state"] is not None:
         head.load_state_dict(best["state"])
 
-    tm = _evaluate(head, feats.x_test, feats.y_test, device, n_classes)
+    tm = _evaluate(head, te, condition, w_r, std, n_classes)
     row = {
         "dataset": dataset, "condition": condition, "head": head_kind, "seed": seed,
-        "d_in": din, "n_train": n, "n_test": len(feats.y_test),
+        "d_in": din, "n_train": n, "n_test": len(te.y),
         "test_acc": tm["acc"], "test_loss": tm["loss"], "test_macro_f1": tm["macro_f1"],
         "test_pos_f1": tm.get("pos_f1"), "test_confusion": tm["confusion"],
         "val_acc_best": best["val_acc"], "val_loss_best": best["val_loss"],
         "best_step": best["step"], "epochs_trained": epochs_done,
         "early_stopped": stopped, "wall_s": round(time.time() - t0, 1),
     }
-    for name, (xe, ye) in feats.extra.items():
-        em = _evaluate(head, xe, ye, device, n_classes)
+    for name, sd in extra.items():
+        em = _evaluate(head, sd, condition, w_r, std, n_classes)
         row[f"{name}_acc"] = em["acc"]
         row[f"{name}_macro_f1"] = em["macro_f1"]
     return row

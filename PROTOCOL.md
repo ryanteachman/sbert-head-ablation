@@ -476,14 +476,16 @@ from the observed SDs after the full run.
 
 ## 15. Compute and experiment tracking
 
-- **Hardware:** Colab (Pro) — embeddings on a GPU runtime, the grid + analysis on
-  CPU. Embedding precompute (NLI: ~1.9M sentence encodes, dedup first) is the
-  GPU cost. The grid trains only small heads.
-- **Feature cache:** for each `(dataset, condition[, seed if rand])` the
-  standardized feature matrix is built once (`x_train` as a disk memmap, ~11.6 GB
-  for NLI) and reused by all 30 seed×head cells — the per-batch rebuild is ~90%
-  of the cost otherwise. Verified bit-identical to the per-batch path. Brings the
-  full 900-cell grid to ~5–6 h on Colab CPU.
+- **Hardware:** Colab Pro. Both the embedding precompute and the grid run on a
+  GPU runtime; analysis runs locally.
+- **Grid execution:** per dataset, `u`/`v` for every split are loaded once onto
+  the GPU (fp16; ~2.7 GB for NLI). Features are built per mini-batch in torch —
+  `|u−v|`, `u*v`, the projection, and standardization are elementwise GPU ops, so
+  the per-batch cost is dominated by the (tiny) head, not feature construction.
+  Standardizer stats are fit once per `(dataset, condition[, seed if rand])`.
+  Full 900-cell grid: ~1–2 h. The torch path is bit-identical to the original
+  numpy per-batch path on CPU (verified); on GPU it differs by ~1e-5 (fp
+  accumulation), uniform across conditions.
 - **Results store:** one tidy row per run in `results/runs.parquet` — dataset,
   condition, head, seed, all metrics, best-checkpoint step, epochs trained, wall
   time, config hash, git commit.
@@ -666,3 +668,22 @@ marginal and confirmation is wanted, that requires a *separate* pre-registered
 follow-up with its own fixed n, not more seeds appended here.
 
 Cost: 600 → 900 cells. §10, §11, §12.1, §12.2 updated for n = 15.
+
+### 2026-08-29 — grid head training runs on GPU
+
+The head-training pipeline was moved from CPU/numpy to torch with `u`/`v`
+resident on the GPU and features built per batch as GPU tensor ops. Reason: on
+Colab CPU a single NLI cell took minutes and a disk-memmap variant was worse
+(random reads on Colab's network-backed disk). The frozen backbone, feature
+definitions, standardization, hyperparameters, seeds, and metrics are all
+unchanged.
+
+- The torch path is **bit-identical to the original numpy per-batch path on CPU**
+  (verified: accuracy, loss, `best_step`, epochs all match). On GPU, fp
+  accumulation order differs → results shift by ~1e-5, applied uniformly across
+  conditions (cannot bias a paired contrast). Same-GPU runs are reproducible;
+  the GPU model is recorded in the results.
+- All 900 cells run on the same GPU. The 90 CPU-computed pilot cells are **not**
+  reused in the grid parquet — the grid is device-consistent end to end.
+- `set_determinism` now also seeds the CUDA generators;
+  `torch.use_deterministic_algorithms(True, warn_only=True)`.

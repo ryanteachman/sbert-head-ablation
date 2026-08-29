@@ -46,7 +46,7 @@ pip freeze > requirements.lock.txt      # lock the resolved versions
 3. `embed.py` — verify L2-norm + determinism, cache embeddings  ← code + local verify **done**; full encode on Colab (`notebooks/embed_colab.ipynb`)
 4. Smoke test — one cell end to end  ← **done** (offline `scripts/smoke_pipeline.py`; real run in pilot notebook)
 5. Pilot — 3 seeds, linear, 90 cells  ← **done** — `results/pilot_runs.parquet`; mechanics/magnitudes/ordering OK
-6. Full grid — 15 seeds, both heads (900 cells)  ← code **done**, ~5-6 h on Colab CPU; run via `notebooks/full_grid_colab.ipynb`
+6. Full grid — 15 seeds, both heads (900 cells)  ← code **done**, ~1-2 h on a Colab GPU; run via `notebooks/full_grid_colab.ipynb`
 7. `analyze.py` — stats, tables, figures  ← **not written**; local, off `results/runs.parquet`
 8. `paper/` — draft
 
