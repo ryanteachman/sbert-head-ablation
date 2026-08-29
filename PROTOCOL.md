@@ -86,7 +86,7 @@ single-term ablations (difference-only, product-only). We refer to C3 as the
 **both-terms head**, not "the concatenated head": every condition here
 concatenates several blocks, so that label would not distinguish C3.
 
-**Grid:** 10 conditions × 3 datasets × 2 head types × 10 seeds = **600 runs**.
+**Grid:** 10 conditions × 3 datasets × 2 head types × 15 seeds = **900 runs**.
 All runs are small heads trained on cached frozen embeddings.
 
 ### 4.1 The embedded 2×3 factorial
@@ -128,7 +128,7 @@ published splits only — no custom splits, no cross-validation.
 - GLUE QQP test labels are hidden → **GLUE QQP dev (≈ 40,430) is the effective
   test set.**
 - **Validation split:** a single fixed 5% stratified holdout carved from GLUE QQP
-  train (seed-independent — the same split for all 10 seeds). Expected ≈ 18k val,
+  train (seed-independent — the same split for all seeds). Expected ≈ 18k val,
   ≈ 345k train.
 - **Label map (fixed):** not_duplicate→0, duplicate→1. Positive base rate ≈ 36.8%.
 - `u`, `v` = question1, question2 (order preserved as given).
@@ -297,7 +297,8 @@ Fixed constants, identical for every cell:
 
 ## 10. Seeds
 
-- **10 seeds:** `{0, 1, 2, 3, 4, 5, 6, 7, 8, 9}`.
+- **15 seeds:** `{0, 1, …, 14}`. (Raised from 10 after the pilot — see §20.
+  Committed before the n-seed inferential test; all 15 are reported.)
 - Each seed controls: head parameter initialization, training-data shuffle order,
   and the `W_r` draw for C4 / C9.
 - Each seed does **not** control: dataset splits (fixed), the QQP validation
@@ -318,11 +319,11 @@ Per (dataset × condition × head × seed) run, on the held-out test split:
 - Per-class precision / recall — retained for error analysis.
 - Best-checkpoint step, epochs trained, wall-clock time, config hash — logged.
 
-Aggregation: mean ± sample std (ddof = 1) across the 10 seeds, plus a t-based 95%
+Aggregation: mean ± sample std (ddof = 1) across the 15 seeds, plus a t-based 95%
 CI. A **test-set bootstrap** CI (resample test examples within a run, 10,000
 draws) is reported alongside to reflect test-set sampling noise that seed
 variance alone misses. (Distinct from the **seed-level bootstrap** of paired
-differences in §12.1, which resamples the 10 seeds.)
+differences in §12.1, which resamples the 15 seeds.)
 
 ---
 
@@ -333,7 +334,7 @@ differences in §12.1, which resamples the 10 seeds.)
 Every reported comparison carries all three layers, following standard NLP
 practice (Reimers & Gurevych 2017; Dror et al. 2018):
 
-1. **Descriptive:** per-condition mean ± sample std across the 10 seeds, a t-based
+1. **Descriptive:** per-condition mean ± sample std across the 15 seeds, a t-based
    95% CI, and the full per-seed distribution (table + strip plot). A single
    score is not reported alone — seed choice alone can produce large, significant
    swings (Reimers & Gurevych 2017).
@@ -362,10 +363,10 @@ On the **linear head**, **accuracy**, for each dataset ∈ {NLI, QQP, PAWS}:
 
 - **Tests, both reported:** paired two-sided t-test **and** Wilcoxon signed-rank.
   The t-test is more powerful and yields the effect CI in (2); Wilcoxon is the
-  distribution-free cross-check but is discreteness-limited at n = 10 (two-sided
-  floor p ≈ 0.002; one flipped seed → p ≈ 0.02). A seed-level bootstrap of the
-  paired difference (10,000 resamples) is reported as a third, assumption-light
-  CI.
+  distribution-free cross-check. At n = 15 its discreteness is no longer
+  limiting (two-sided floor p ≈ 6e-5; a 14–1 seed split ≈ 1e-3 — both well under
+  the Holm-corrected threshold). A seed-level bootstrap of the paired difference
+  (10,000 resamples) is reported as a third, assumption-light CI.
 - **Decision rule (pre-registered):** a primary hypothesis is called
   **confirmed** only if (a) the Holm-corrected paired t-test has p < 0.05 **and**
   (b) Wilcoxon agrees in sign with uncorrected p < 0.05. Disagreement is reported
@@ -384,14 +385,14 @@ On the **linear head**, **accuracy**, for each dataset ∈ {NLI, QQP, PAWS}:
 
 ### 12.2 Power / minimum detectable effect
 
-With n = 10, paired t, 80% power: detectable `d_z ≈ 1.0` at an uncorrected
-two-sided α = 0.05, rising to `d_z ≈ 1.2` at the Holm worst-case per-test
-α ≈ 0.05/12 ≈ 0.004. In both cases the mean difference must be roughly 1–1.2 SD
-of the per-seed differences. Given per-seed metric SD with frozen embeddings is
-typically ~0.1–0.3 pp, the MDE in accuracy points is roughly **0.1–0.4 pp**. A
-null result is reported as "no detectable effect above ~X pp," never as "no
-effect." The exact per-contrast MDE is recomputed from the observed SDs after
-the full run.
+With n = 15, paired t, 80% power: detectable `d_z ≈ 0.78` at an uncorrected
+two-sided α = 0.05, rising to `d_z ≈ 0.95` at the Holm worst-case per-test
+α ≈ 0.05/12 ≈ 0.004 — i.e. the mean difference must be ~0.8–1.0 SD of the
+per-seed differences. The 3-seed pilot's NLI C3−C1 difference had SD ≈ 0.53 pp
+(d_z ≈ 1.3), which n = 15 comfortably resolves if it holds; the QQP/PAWS
+differences were smaller. A null result is reported as "no detectable effect
+above ~X pp," never as "no effect." The exact per-contrast MDE is recomputed
+from the observed SDs after the full run.
 
 ### 12.3 Secondary / exploratory analyses (labeled as such, not corrected)
 
@@ -450,7 +451,7 @@ the full run.
   we measure deltas between head conditions, framed as such.
 - Practical "you should always include `u*v`" — effect sizes are reported; the
   reader judges whether a small gain justifies a 33% wider head.
-- Strong null claims — n = 10 is modest; report CIs and MDE.
+- Strong null claims — n = 15 is still modest; report CIs and MDE.
 
 ---
 
@@ -480,9 +481,9 @@ the full run.
   GPU cost. The grid trains only small heads.
 - **Feature cache:** for each `(dataset, condition[, seed if rand])` the
   standardized feature matrix is built once (`x_train` as a disk memmap, ~11.6 GB
-  for NLI) and reused by all 20 seed×head cells — the per-batch rebuild is ~90%
+  for NLI) and reused by all 30 seed×head cells — the per-batch rebuild is ~90%
   of the cost otherwise. Verified bit-identical to the per-batch path. Brings the
-  full 600-cell grid to ~3–4 h on Colab CPU.
+  full 900-cell grid to ~5–6 h on Colab CPU.
 - **Results store:** one tidy row per run in `results/runs.parquet` — dataset,
   condition, head, seed, all metrics, best-checkpoint step, epochs trained, wall
   time, config hash, git commit.
@@ -504,7 +505,7 @@ SBERT/
     features.py            # build C0..C9 vectors, standardization, random proj
     heads.py               # linear + fixed MLP
     train.py               # single-run training loop + early stopping
-    run_grid.py            # orchestrate the 600 runs -> runs.parquet
+    run_grid.py            # orchestrate the 900 runs -> runs.parquet
     analyze.py             # stats, tables, figures
   data/                    # raw + processed (gitignored)
   embeddings/              # cached arrays (gitignored)
@@ -532,7 +533,7 @@ SBERT/
    with-`u,v` counterparts; C4 ≈ C1 and C9 ≈ C2); (c) per-seed variance is small
    (~0.1–0.3 pp); (d) early stopping triggers before max epochs; (e) wall-clock
    per run is as expected. No significance tests are run on 3 seeds.
-6. **`run_grid.py`** — full grid: all 10 seeds, both heads → `runs.parquet`.
+6. **`run_grid.py`** — full grid: all 15 seeds, both heads → `runs.parquet`.
 7. **`analyze.py`** — primary family + corrections + effect sizes; factorial;
    exploratory contrasts; tables and figures.
 8. **`paper/`** — draft.
@@ -557,7 +558,7 @@ SBERT/
    1e-4, same optimizer / LR / early-stopping as the linear head. One config,
    fixed a priori. Citable basis in §8.2.
 5. **Pilot — RESOLVED:** 3 seeds `{0, 1, 2}` on the linear head across the full
-   10×3 condition grid (90 runs, Phase 5), before the full 10-seed / both-head
+   10×3 condition grid (90 runs, Phase 5), before the full 15-seed / both-head
    run (Phase 6).
 6. **Primary statistical test — RESOLVED:** paired t-test *and* Wilcoxon both
    reported; a hypothesis is "confirmed" only if both agree (Holm-corrected t
@@ -648,3 +649,20 @@ bias any C-vs-C contrast.
 
 The pilot-gated `max_epochs` / LR-schedule contingencies in §9 are pre-registered
 and are **not** deviations if triggered.
+
+### 2026-08-28 — seed count raised 10 → 15
+
+The 3-seed pilot (non-inferential, sanity-check only per §17) suggested the
+headline `u*v` effect is small: NLI C3−C1 ≈ +0.7 pp (paired-difference SD
+≈ 0.53 pp), QQP ≈ +0.2 pp, PAWS ≈ 0. To give the paired tests more power and to
+lift Wilcoxon off its small-n discreteness floor, the seed count was raised from
+10 to **15** (`{0..14}`).
+
+This was decided and committed **before running any n-seed inferential test** —
+only the 3-seed pilot had been seen — so it is a pre-commitment, not optional
+stopping. **All 15 seeds are reported regardless of outcome**, and 15 is now
+frozen: the grid is run once at n = 15 and that is the answer. If the result is
+marginal and confirmation is wanted, that requires a *separate* pre-registered
+follow-up with its own fixed n, not more seeds appended here.
+
+Cost: 600 → 900 cells. §10, §11, §12.1, §12.2 updated for n = 15.

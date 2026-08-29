@@ -32,7 +32,7 @@ pip freeze > requirements.lock.txt      # lock the resolved versions
 | `src/features.py` | build C0–C9 feature vectors, per-block standardization, random projection |
 | `src/heads.py` | linear + fixed MLP heads |
 | `src/train.py` | single grid cell: train head, early-stop, evaluate |
-| `src/run_grid.py` | orchestrate the grid (`--pilot` = 90 cells, full = 600) → `results/*.parquet` |
+| `src/run_grid.py` | orchestrate the grid (`--pilot` = 90 cells, full = 900) → `results/*.parquet` |
 | `src/analyze.py` | primary family + corrections + effect sizes; factorial; figures (Phase 7) |
 | `scripts/smoke_pipeline.py` | offline plumbing check on synthetic embeddings |
 | `notebooks/pilot_colab.ipynb` | Phase 4-5 smoke test + pilot on Colab |
@@ -46,7 +46,7 @@ pip freeze > requirements.lock.txt      # lock the resolved versions
 3. `embed.py` — verify L2-norm + determinism, cache embeddings  ← code + local verify **done**; full encode on Colab (`notebooks/embed_colab.ipynb`)
 4. Smoke test — one cell end to end  ← **done** (offline `scripts/smoke_pipeline.py`; real run in pilot notebook)
 5. Pilot — 3 seeds, linear, 90 cells  ← **done** — `results/pilot_runs.parquet`; mechanics/magnitudes/ordering OK
-6. Full grid — 10 seeds, both heads (600 cells)  ← code **done**, feature-cache refactor makes it ~3-4 h; run via `notebooks/full_grid_colab.ipynb`
+6. Full grid — 15 seeds, both heads (900 cells)  ← code **done**, ~5-6 h on Colab CPU; run via `notebooks/full_grid_colab.ipynb`
 7. `analyze.py` — stats, tables, figures  ← **not written**; local, off `results/runs.parquet`
 8. `paper/` — draft
 
